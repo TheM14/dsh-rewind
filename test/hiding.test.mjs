@@ -63,23 +63,20 @@ const U = (seq, key) => makeEl({ 'data-chat-flow-key': key, 'data-chat-flow-kind
 const ASST = (key) => makeEl({ 'data-chat-flow-key': key, 'data-chat-flow-kind': 'assistant-step' })
 const TOOL = (key) => makeEl({ 'data-chat-flow-key': key, 'data-chat-flow-kind': 'tool-call' })
 
+const ROWS_SELECTOR = '[data-chat-flow-key], [data-chat-anchor-key]'
 let flow = []
 const doc = {
-  querySelector: (sel) => (sel === '[data-chat-flow]' ? { children: flow } : null),
-  querySelectorAll: (sel) => (sel === '[data-xsj-hidden="1"]'
-    ? flow.filter((r) => r.getAttribute('data-xsj-hidden') === '1')
-    : []),
+  querySelector: () => null,
+  querySelectorAll: (sel) => {
+    if (sel === ROWS_SELECTOR) return flow
+    if (sel === '[data-xsj-hidden="1"]') return flow.filter((r) => r.getAttribute('data-xsj-hidden') === '1')
+    return []
+  },
 }
 const states = new Map()
 
 const factory = new Function('__doc', '__states', `
 const document = __doc;
-function rwRows() {
-  const list = document.querySelector('[data-chat-flow]');
-  if (!list) return [];
-  return Array.prototype.slice.call(list.children).filter((el) =>
-    el.getAttribute && (el.hasAttribute('data-chat-flow-key') || el.hasAttribute('data-chat-anchor-key')));
-}
 function readState(sid) { return __states.get(sid); }
 function rwRefetch() {}
 function get() { return Promise.resolve(null); }

@@ -2,7 +2,7 @@
 
 [English](./README_EN.md) | 简体中文
 
-DSH（[DeepSeek Harness](https://github.com/deepseek-ai)）会话回退插件。永久 bundle 插件：宿主机半 + Web 客户端半，零依赖、零构建步骤。
+DSH（[DeepSeek Harness](https://github.com/deepseek-ai)）会话回退插件。永久 bundle 插件：宿主机半 + Web 客户端半，零依赖、零构建步骤。桌面端与 `dsh web` 使用同一份代码、同一套安装方式。
 
 ## 功能
 
@@ -10,7 +10,7 @@ DSH（[DeepSeek Harness](https://github.com/deepseek-ai)）会话回退插件。
   - 若模型正在思考/输出，**立即打断**当前回合；
   - 该消息及其后的所有内容在聊天视图中隐藏（如同从未发生）；
   - 该消息文本自动填入输入框，**未发送、可编辑**；
-  - 该消息携带的**图片也会重新挂回输入框**（从会话日志读回原始字节，走官方附件入档流程，自动套用图片数量/大小限制）；
+  - 该消息携带的**图片也会重新挂回输入框**（客户端按会话凭据从日志读回原始字节，走官方草稿附件入档流程，自动套用图片数量/大小限制）；
   - 下一次发送时，模型只看到截断后的历史（回退点之前）+ 新消息。
 - 回退待发送期间：
   - 输入框上方出现提示横幅；
@@ -20,91 +20,112 @@ DSH（[DeepSeek Harness](https://github.com/deepseek-ai)）会话回退插件。
 
 ## 版本兼容性
 
-- **v2.4.0 实测支持 dsh 0.1.5-rc.2**，并保留对 0.1.x 早期版本的兼容——事件流读取优先官方 `snapshotEvents()` / `eventAt()`，旧宿主自动回退 `session.events`。
-- **v2.4.0 修复「模型输出没有被隐藏」**（本版主要修复）：
-  - **成因**：本插件只接管了 `conversation.chat.node` 的 `user` / `steering` 两个渲染器，因此只有这两类行会被打上 `data-xsj-seq` 标记；模型的 `assistant-step` 输出、工具调用、context 等行走官方渲染器，**从来没有标记**。此前隐藏判定对未标记的行一律「不隐藏」，于是提交区间后只藏住了提问、回答仍然留在屏幕上。
-  - **修法**：未标记的行不再被放弃，而是按 DOM 顺序从**前一条已标记行**继承判定——它属于其所跟随的那一轮。仅对「前面完全没有证据」的前导行才回退到后方证据。这个前向归属是必须的：若改成「后面有隐藏就算隐藏」，区间**上方**那条回答会被误藏（开发过程中确实踩到，已由 `test/hiding.test.mjs` 覆盖）。
-  - **驱动卸载时还原 DOM**：隐藏是直接写 DOM 的，此前 teardown 只清定时器与 observer。切换会话或 composer 重挂载会把隐藏行留给下一个视图（凭空出现空白行）。现在 teardown 会释放所有带本插件标记的行，且只释放这些行，不影响其他特性设置的 display。
-  - **区分「没数据」与「没有区间」**：冷加载（刷新 / 切会话）时驱动先于 `/state` 返回而运行，此前二者无法区分，导致**每次加载都会闪现**已被回退掉的尾巴；若 `/state` 请求失败，则永久保持可见——界面看到的消息模型其实看不见。现在按会话记录 `fetched` / `fetchFailed`：未拿到答复时保持当前判定不动并重试，拿到后才据实隐藏；本地刚记录下的 mark 仍会立即生效。
-  - **Host：`agent/disposed` 不再泄漏补丁**：`ensurePatched` 会在 session 实例上装一个闭包了 `st.ranges` 的 `deriveMessages` 覆盖，而 disposed 此前直接丢弃状态记录，使该覆盖无人可解——会话会**永久**继续按已回退的区间过滤模型上下文，且跨插件重载存活。现在与 `evictIfNeeded` 同规则，先解挂再丢弃。
-  - **`ensurePatched` 改为自愈**：不再只信 `st.patched` 标志，而是比对实际安装的方法与记录的包装器，不一致就重新安装（幂等），避免标志与实际脱节后**静默停止**对模型隐藏。
-  - **图片引用只缓存命中结果**：引用一旦进入 append-only 日志就不会消失，命中可长期有效；未命中则不然——缓存未命中会让 `/image` 对一个日志里确实存在的 id 返回 404，表现为回退时图片被静默丢弃。
-- v2.3.0 变更：
-  - **回退时同步回填图片**：Host 半新增 `/api/xsj-rewind/image` 端点，依 attachmentId 从会话日志读回原始字节；客户端构造成 `File` 后通过 composer 的隐藏文件输入重新入档，自动触发官方的图片数量/大小校验。
-  - **修复图片消息的连锁渲染崩溃**：`@deepseek-ai/dsh-client-ui-attachment` 客户端半在 0.1.5-rc.2 只导出 `apply`/`inject`（不再有 `ImageGallery` 组件），此前引用它会让含图片的用户消息抛错，并被 React 错误边界放大到**前后相邻的整片消息**（表现为大范围回退按钮消失）。现改用官方同款 `renderMessageImages` prop（路由到 `conversation.message.images` 槽位）。
-  - **加固槽位注册**：`slots` 服务改为防御性获取并逐席位 `try/catch`。此前任一次注册冲突（如客户端 HMR 重载竞态）都会中断整个 `apply()`，导致「样式已注入但渲染器全丢」。
-  - **DOM 隐藏驱动更保守**：未打戳的行不继承相邻行的隐藏判定，避免刚发送的消息在打戳完成前被误隐藏。（**v2.4.0 修正**：该保守策略同时导致模型输出永远不被隐藏，见上方 v2.4.0 说明。）
-  - **图片回填串行化**：多次回退不再争用同一个文件输入。
-  - Host 半的 `attachments` 服务改为运行时解析（`ctx.get`），缺少附件 provider 时插件仍能正常挂载，仅图片端点降级返回 501。
-  - 资源上限：会话状态表、图片引用缓存均设有容量上限；图片响应与 attachmentId 长度增加校验。
-- v2.2.0 变更：
-  - 适配 0.1.5-rc.2：`primitives.MessageText` 已被移除，用户气泡文本改用与官方相同的 `projectUserText()` 渲染（自动获得 @引用/会话 chip 高亮）；
-  - 客户端 inject 声明更新：移除已废弃的 `@deepseek-ai/dsh-client-runtime`；
-  - 清理冗余与调试残留代码（调试日志、无效的 fuzzy 会话解析、两处死代码）。
-- 旧版（≤2.1.2）在 dsh 0.1.5-rc.2 上的已知症状：用户消息行渲染崩溃、回退按钮不出现——请升级到 ≥2.3.0。
+| 插件版本 | DSH | 状态 |
+| --- | --- | --- |
+| 2.5.0 | 0.2.1-rc.2 | 当前版本，桌面端与 `dsh web` 均已适配 |
+| ≤ 2.4.0 | 0.1.x | 不支持 0.2.x |
 
-## 安全说明
-
-- 四个端点（`mark` / `cancel` / `state` / `image`）注册在 dsh 的 Web 服务器上，**遵循 dsh 自身的本地信任模型**：`dsh web` 默认只监听 `127.0.0.1`，因此端点仅本机可达、不经 dsh 的 API 鉴权层。若你把 dsh web 绑定到对外地址（如 `0.0.0.0`），这些端点会随之外露——此时请自行在网络层（防火墙 / 反向代理鉴权）加以限制。
-- `/image` 端点的授权模型：只会返回**当前会话日志中确实引用过**的 attachment（按 attachmentId 在事件流中查找），不提供按路径或任意 id 读取的能力；字节读取由 dsh 的 `attachments.readImage` 完成，含完整性校验。
-- 请求体上限 64 KB；attachmentId 长度上限 256；单张图片响应上限 64 MB。
-- 插件不收集、不上报任何数据；所有状态都留在本地会话日志中。
-
-## 日志与可恢复性
-
-- 会话日志（append-only 事件流）**从不删除任何原始消息**。
-- 每次状态变化追加一条 `hook/invoked` 事件，负载为
-  `{ source: 'xsj.rewind', phase: 'mark' | 'cancel' | 'commit', targetSeq, hiddenFrom?, hiddenTo?, preview? }`。
-  该事件类型属于本构建的已知保留词条（无读写方），重载安全。
-- 进程重启后打开会话，Host 半会回放这些记录重建隐藏区间：模型侧与 UI 侧的隐藏状态跨重启保持一致。
-- 「轨迹」视图不渲染该保留事件类型；审计请直接查看会话 JSONL 日志。
+0.2.x 改写了客户端渲染与消息派生两处契约，旧版在这条线上会表现为「回退按钮整个消失」：用户气泡的文本渲染器从 `primitives.projectUserText` 迁移到 `conversation.chat.user.content` 工厂槽，行组件的 props 也不再提供 `inputActions`。2.5.0 按新契约重写客户端，并把模型侧截断改为官方 surface 替换（见「实现要点」）。安装时若还想留在 0.1.x，请使用 2.4.0。
 
 ## 安装
 
 ```powershell
-# 在任意目录执行（路径指向本仓库克隆位置）：
+# 桌面端（profile 名为 desktop）：
+dsh plugin --profile desktop add <本仓库目录的绝对路径>
+
+# dsh web（profile 名为 web）：
 dsh plugin --profile web add <本仓库目录的绝对路径>
 
-# 重启 DSH 进程，并刷新浏览器页面
+# 安装后重启 DSH 进程 / 桌面应用，并刷新页面
 ```
 
 该命令会把包登记进 profile（`~/.dsh/profiles/<name>/package.json` 的
 `dependencies` + `dsh.profile.bundles`），profile 启动时合并本包的
 `cordis.patch.yml` 插入宿主机插件行，Web 客户端扫描自动加载 `lib/client.js`。
+桌面端与 `dsh web` 共用这一套加载机制，因此两条线只需换 `--profile`。
 
 ## 卸载
 
 ```powershell
-dsh plugin --profile web remove @xsj/dsh-rewind
-# 重启 DSH。会话日志中的 rewind 记录无害保留（hook/invoked 为已知类型）。
+dsh plugin --profile desktop remove @xsj/dsh-rewind
+# 重启 DSH。会话日志中的回退记录无害保留（见「日志与可恢复性」）。
 ```
 
 ## 实现要点
 
-- **模型侧截断**：按需修补 live `Session` 对象的 `deriveMessages()`，按已提交区间过滤
-  surface 节点（带签名缓存）。请求构建、`llm/stream` 重放不变量、图片检查全部走同一入口，天然一致。
-  日志不增删改任何消息事件。
+- **模型侧截断**：回退生效时向会话日志追加一条**空内容 `developer/message`**，其
+  `surfaceOp` 为 `replace`，替换从回退点一直到 surface 末尾的节点，并按要求在
+  `sourceEventSeqs` 中列出被遮蔽的全部节点。空内容的 developer 消息不派生任何模型消息，
+  因此模型看到的是截断后的历史，而日志里一条消息都没少。
+  - 不修改 `deriveMessages()`，也不写自定义事件类型：截断是日志自身的一部分，重放日志即可
+    恢复（重启、fork、插件重载都不需要额外对账）。
+  - 每次替换都会递增 surface 的 `replaceGeneration`，宿主据此开启新的消息序列并重新下发
+    系统提示，请求头一致性由宿主自身维护。
 - **打断**：mark 时若代理正在运行，`agent.cancel({ kind: 'user' }, { keepInbox: true })`
   中断当前回合；排队消息保留，随后从截断点继续。
-- **生效点**：`agent/pre-step` 瀑布中，待回退会话一旦有新输入消息进入步骤即提交隐藏区间
-  `[targetSeq, 当前日志末尾]`；新消息在此之后追加，不受影响。
-- **UI 隐藏**：纯 DOM 实现——聊天行包裹元素带 `data-chat-flow-key`，客户端按行打 seq 戳
-  并由 MutationObserver 驱动，对隐藏行内联 `display:none`；不依赖宿主 store 内部形状，
+- **生效点**：`agent/pre-step` 瀑布中，待回退会话一旦有新输入消息进入步骤即提交替换；
+  新消息在此之后追加，不受影响。
+- **UI 隐藏**：纯 DOM 实现——聊天行带 `data-chat-flow-key`，客户端按行打 seq 戳并由
+  MutationObserver 驱动，对隐藏行内联 `display:none`；不依赖宿主 store 内部形状，
   取消/切换会话即还原，不改动任何既有渲染器。
-  - 只有 `user` / `steering` 行**有 seq 可打**；其余行（模型输出、工具调用、context）
-    走官方渲染器、无标记，因此按 DOM 顺序从前一条已标记行**前向归属**，前导无证据的行
-    才回退到后方证据。不再采用「未打戳即不隐藏」。
-  - 隐藏状态写的是活动 DOM，故驱动卸载时必须释放（且只释放带本插件标记的行）。
+  - 只有 `user` / `steering` 行由本插件渲染、能打上 seq；模型输出、工具调用、context 等行
+    按 DOM 顺序从**前一条已标记行**继承判定（前导无证据的行才回退到后方证据）。
+  - 隐藏状态写的是活动 DOM，故驱动卸载时只释放带本插件标记的行。
 - **回退图标**：以优先级 `-1` 接管 `conversation.chat.node` 的 `user`/`steering`
-  渲染器（槽位系统的原生遮蔽机制），行内复刻原生气泡（projectUserText / ImageGallery /
-  Tooltip / writeClipboard），追加 ↺ 按钮。
+  渲染器（槽位系统的原生遮蔽机制）。气泡本身交给官方
+  `conversation.chat.user.content` 工厂槽渲染，因此 @引用、会话 chip、图片、文件卡片
+  始终由外壳负责，插件只多出 ↺ 按钮。
+- **草稿与图片回填**：草稿经 `ctx.conversation.input.for(scope).setDraft()` 写入（与命令面板
+  同一入口），服务不可用时回退到编辑器的 DOM 写入；图片经会话凭据
+  `session.readAttachment()` 读回字节，再由 `createDrafts()` + `addAttachments()` 进入
+  官方草稿附件登记，配额与预览均由外壳负责。
+- **状态**：待发送的回退只存在于 Host 内存（草稿不跨进程，因此无需持久化）；已提交的回退
+  区间由日志中的替换事件在启动时推导，插件不写任何私有记录。
+
+## 安全说明
+
+- 三个端点（`mark` / `cancel` / `state`）注册在 dsh 的 Web 服务器上，**遵循 dsh 自身的
+  本地信任模型**：`dsh web` 与桌面端默认只监听本机回环地址，因此端点仅本机可达、不经
+  dsh 的 API 鉴权层。若你把 dsh web 绑定到对外地址（如 `0.0.0.0`），这些端点会随之外露
+  ——此时请自行在网络层（防火墙 / 反向代理鉴权）加以限制。
+- 图片读取不经过本插件：客户端用当前会话的凭据调用宿主的 `readAttachment`，授权范围与
+  聊天记录一致（只能读到本会话引用过的附件）。
+- 请求体上限 64 KB；`seq` 必须是安全非负整数；目标必须是 `user/message` 且当前仍在模型
+  可见的 surface 上。
+- 插件不收集、不上报任何数据；所有状态都留在本地会话日志中。
+
+## 日志与可恢复性
+
+- 会话日志（append-only 事件流）**从不删除任何原始消息**。
+- 回退生效只追加一条空内容 `developer/message`（`surfaceOp: replace`），不写入任何未知
+  事件类型，因此日志在 0.2.x 的读取端始终可打开。
+- 进程重启后打开会话，surface 回放会重建同样的截断：模型侧与 UI 侧的隐藏状态跨重启一致。
+- 「轨迹」视图不渲染被替换的副本，回退点之后的行在轨迹里仍按原始事件存在；审计请直接查看
+  会话日志。
+
+## 已知限制
+
+- 回退目标必须仍在模型可见的 surface 上。若该消息已被压缩（compaction）遮蔽，回退会被
+  拒绝并提示，而不是在发送时才失败。
+- 回退本身不做文件还原（工作区文件不在本插件职责内）。
+- 待发送的回退不跨进程：重启 DSH 后草稿仍在输入框里，但「待发送」状态不会恢复（这与设计
+  一致——草稿本身是唯一的载体）。
 
 ## 移植
 
 本插件无任何 npm 依赖：Host 半只用 Node 内置模块与注入服务，Client 半经
 `window.__ModuleLoader__` 从外壳的冻结模块表取 `react` /
-`@deepseek-ai/dsh-client-ui-primitives` / `@deepseek-ai/dsh-client-ui-attachment`。
-克隆本仓库到任意机器后按「安装」一节操作即可。
+`@deepseek-ai/dsh-client-ui-primitives`。克隆本仓库到任意机器后按「安装」一节操作即可。
+
+## 测试
+
+```powershell
+node test/hiding.test.mjs          # 行隐藏判定（纯 DOM 逻辑）
+node test/client-smoke.test.mjs    # 客户端在 0.2.1 契约下的注册与渲染
+# Host 半需要真实的 @deepseek-ai/dsh-session（指向其 lib/index.js，例如源码仓库的
+# packages/core/session/lib/index.js，或任意 node_modules 安装）：
+$env:DSH_SESSION_MODULE="<path>/lib/index.js"; node test/host.test.mjs
+```
 
 ## License
 

@@ -4,7 +4,8 @@ English | [简体中文](./README.md)
 
 A conversation-rewind plugin for DSH (DeepSeek Harness). A permanent bundle
 plugin with a host half and a web client half — zero dependencies, zero build
-steps.
+steps. The desktop app and `dsh web` run the same code and share one install
+procedure.
 
 ## Features
 
@@ -15,8 +16,9 @@ steps.
     tail never happened);
   - pre-fills the composer with the message text — **unsent and editable**;
   - **re-attaches any images** that rode the message back into the composer
-    (the host reads the original bytes from the session log and feeds them back
-    through the official attachment intake, so image count/size limits apply);
+    (the client reads the original bytes through the session's own credential
+    and feeds them through the official draft-attachment intake, so image
+    count/size limits apply);
   - on the next send, the model only sees the truncated history (everything
     before the rewind point) plus your new message.
 - While a rewind is pending:
@@ -30,173 +32,144 @@ steps.
 
 ## Version compatibility
 
-- **v2.4.0 is verified against dsh 0.1.5-rc.2** while keeping earlier 0.1.x
-  hosts working — event-log access prefers the official `snapshotEvents()` /
-  `eventAt()` and falls back to `session.events` on older hosts.
-- **v2.4.0 fixes "the model's output was not hidden"** (the main fix here):
-  - **Cause**: the plugin shadows only the `user` / `steering` renderers of
-    `conversation.chat.node`, so only those rows ever carried a `data-xsj-seq`
-    stamp. The model's `assistant-step` output, tool calls and context rows
-    render through the shipped renderer and were **never stamped**. The hiding
-    pass treated an unstamped row as "no evidence" and therefore visible, so a
-    committed range hid the prompt while the answer stayed on screen.
-  - **Fix**: an unstamped row is no longer given up on. It inherits the verdict
-    of the nearest stamped row **before** it, which is the turn it belongs to;
-    only a leading run with no evidence at all falls back to the evidence that
-    follows. The forward attribution matters: "hidden if anything later is
-    hidden" sweeping in the answer *above* a range is a real regression that was
-    hit during development and is now covered by `test/hiding.test.mjs`.
-  - **Restore the DOM on driver teardown**: hiding writes to the live DOM, but
-    teardown only cleared the timer and observer. Switching sessions or
-    remounting the composer left the hidden rows for the next view (blank rows
-    out of nowhere). Teardown now releases every row carrying this plugin's
-    marker — and only those, leaving any other feature's `display` untouched.
-  - **Tell "no data yet" apart from "no ranges"**: on a cold load the driver ran
-    before `/state` answered, and the two were indistinguishable, so **every
-    load flashed** the rewound tail back into view; if the read failed it stayed
-    visible for good, leaving the UI showing messages the model cannot see.
-    Sessions now track `fetched` / `fetchFailed`: while no answer has arrived the
-    current verdicts are held and a retry is scheduled, and a locally recorded
-    mark still applies immediately.
-  - **Host: `agent/disposed` no longer strands the patch**: `ensurePatched`
-    installs a `deriveMessages` override on the session instance closing over
-    `st.ranges`, and disposal used to drop the state record outright, leaving
-    that override with no record to unwind it — the session kept filtering its
-    model context **permanently**, surviving a plugin reload. Disposal now
-    follows the same rule as `evictIfNeeded`: unwind first, then drop.
-  - **`ensurePatched` is self-healing**: it no longer trusts the `st.patched`
-    flag alone but compares the installed method against the recorded wrapper
-    and re-installs when they diverge (idempotent), so a flag that drifts out of
-    sync cannot silently stop hiding the tail from the model.
-  - **Image references cache hits only**: a reference, once in the append-only
-    log, can never disappear, so a hit stays valid; a miss cannot, and caching
-    one made `/image` answer 404 for an id the log does reference — surfaced as
-    an image silently dropped on rewind.
-- Changes in v2.3.0:
-  - Rewind now **re-attaches images**: the host half exposes
-    `/api/xsj-rewind/image` to read a message's durable image bytes by
-    attachmentId, and the client rebuilds `File` objects and feeds them back
-    through the composer's hidden file input, inheriting the shipped image
-    count/size validation.
-  - **Fixed a cascading render crash on image messages**: the client half of
-    `@deepseek-ai/dsh-client-ui-attachment` exports only `apply`/`inject` in
-    0.1.5-rc.2 (no `ImageGallery` component), so referencing it threw inside
-    any image-bearing user row and the React error boundary widened the damage
-    to the surrounding rows — the rewind button vanished across a whole span of
-    messages. Images now render through the shipped `renderMessageImages` prop
-    (routed to the `conversation.message.images` slot).
-  - **Hardened slot registration**: the `slots` service is resolved
-    defensively and each seat registers under its own `try/catch`. A single
-    registration conflict (e.g. a client HMR rebuild race) previously aborted
-    `apply()`, leaving the stylesheet injected with every renderer lost.
-  - **Safer DOM hide driver**: an unstamped row no longer inherits a
-    neighbour's hidden verdict, so a freshly sent message cannot be hidden
-    while its view is still stamping. (**Corrected in v2.4.0**: that same
-    conservatism made the model's output permanently un-hideable — see above.)
-  - **Serialized image re-attachment** so concurrent rewinds cannot race on the
-    same file input.
-  - The host half resolves `attachments` at call time (`ctx.get`), so a missing
-    attachment provider no longer blocks the mount; the image endpoint alone
-    degrades to a 501.
-  - Resource bounds: the per-session state table and the image-reference cache
-    are capped, and image responses plus attachmentId length are validated.
-- Changes in v2.2.0:
-  - Adapted to 0.1.5-rc.2: `primitives.MessageText` was removed; the user
-    bubble now renders text through the same `projectUserText()` helper the
-    shipped bubble uses (reference/session chips included);
-  - Client inject declaration updated: dropped the retired
-    `@deepseek-ai/dsh-client-runtime`;
-  - Dead code and debug scaffolding removed (debug log file, fuzzy session
-    resolution, two unused code paths).
-- Known symptoms of ≤2.1.2 on dsh 0.1.5-rc.2: user message rows crash while
-  rendering, no rewind button — upgrade to ≥2.3.0.
+| Plugin | DSH | Status |
+| --- | --- | --- |
+| 2.5.0 | 0.2.1-rc.2 | Current — desktop app and `dsh web` |
+| ≤ 2.4.0 | 0.1.x | Not compatible with 0.2.x |
+
+0.2.x rewrote two contracts this plugin depends on, which is why older builds
+lose the rewind button entirely on that line: user-bubble text moved from
+`primitives.projectUserText` to the `conversation.chat.user.content` Factory
+slot, and row components no longer receive `inputActions`. 2.5.0 rebuilds the
+client half against the new contract and switches model-side truncation to the
+harness's own surface replacement (see "How it works"). Stay on 2.4.0 if you
+need the 0.1.x line.
+
+## Install
+
+```powershell
+# desktop app (profile name: desktop):
+dsh plugin --profile desktop add <absolute path to this repo>
+
+# dsh web (profile name: web):
+dsh plugin --profile web add <absolute path to this repo>
+
+# then restart DSH / the desktop app and refresh the page
+```
+
+The command registers the package into the profile
+(`~/.dsh/profiles/<name>/package.json`: `dependencies` + `dsh.profile.bundles`).
+At boot the profile merges this package's `cordis.patch.yml`, inserting the host
+plugin row; the web client scan then serves `lib/client.js` automatically. The
+desktop app and `dsh web` use the same loader, so only the profile name differs.
+
+## Uninstall
+
+```powershell
+dsh plugin --profile desktop remove @xsj/dsh-rewind
+# restart DSH. Rewind records in session logs stay harmlessly (see "Log &
+# recovery").
+```
+
+## How it works
+
+- **Model-side truncation**: when a rewind commits, the host appends an
+  **empty-content `developer/message`** whose `surfaceOp` is `replace`, covering
+  the surface from the rewind point through the tail, with every shadowed node
+  listed in `sourceEventSeqs`. An empty developer message derives no LLM
+  message, so the model sees the truncated history while the log keeps every
+  message.
+  - No `deriveMessages()` patch and no custom event type: the truncation is part
+    of the log itself, so replaying it (restart, fork, plugin reload) restores
+    the same state with no reconciliation.
+  - Each replacement bumps the surface `replaceGeneration`; the host uses that to
+    start a new message series and re-send the system prompt, and it owns request
+    header consistency.
+- **Interrupt**: on mark, a running agent is cancelled with
+  `agent.cancel({ kind: 'user' }, { keepInbox: true })`; queued messages survive
+  and continue from the rewind point.
+- **Commit point**: inside the `agent/pre-step` waterfall, the first step that
+  claims a real input message appends the replacement; the new message lands
+  afterwards and stays visible.
+- **UI hiding**: purely DOM-driven — chat rows carry `data-chat-flow-key`; the
+  client stamps each row with its seq and a MutationObserver applies inline
+  `display:none` to hidden rows. Nothing depends on the host store's internal
+  shape; cancelling or switching sessions restores everything without touching
+  any shipped renderer.
+  - Only `user` / `steering` rows are rendered by this plugin and can be stamped;
+    model output, tool calls and context rows inherit the verdict of the nearest
+    stamped row **before** them (a leading run with no evidence falls back to the
+    evidence that follows).
+  - Hiding writes to the live DOM, so teardown releases only the rows carrying
+    this plugin's marker.
+- **Rewind icon**: takes over the `user`/`steering` cells of
+  `conversation.chat.node` at priority `-1` (the slot system's native
+  shadowing). The bubble itself is rendered by the shipped
+  `conversation.chat.user.content` Factory, so @-references, session chips,
+  images and file cards stay the shell's; the plugin only adds the ↺ button.
+- **Draft and images**: the draft is written through
+  `ctx.conversation.input.for(scope).setDraft()` (the same entry the command
+  palette uses), with a DOM fallback when the service is unavailable; images are
+  read back with the session's `readAttachment()` and registered through
+  `createDrafts()` + `addAttachments()`, so quotas and previews stay the shell's.
+- **State**: a pending rewind lives in host memory only (the composer draft does
+  not survive a process, so there is nothing to persist); committed ranges are
+  derived from the log's replacement events at startup. The plugin writes no
+  private record type.
 
 ## Security notes
 
-- The four endpoints (`mark` / `cancel` / `state` / `image`) register on the dsh
-  web server and therefore **follow dsh's own local-trust model**: `dsh web`
-  listens on `127.0.0.1` by default, so they are reachable from this machine
-  only and do not pass through dsh's API authentication layer. If you bind dsh
-  web to a routable address (e.g. `0.0.0.0`), these endpoints become reachable
-  too — restrict them at the network layer (firewall or an authenticating
-  reverse proxy) in that case.
-- The `/image` endpoint is scoped by the session log: it returns bytes only for
-  attachments **that session actually references** (matched by attachmentId
-  against the event stream). There is no path-based or arbitrary-id read. The
-  bytes come from dsh's `attachments.readImage`, which verifies integrity.
-- Limits: 64 KB request bodies, 256-character attachment ids, 64 MB per image
-  response.
+- The three endpoints (`mark` / `cancel` / `state`) register on the dsh web
+  server and therefore **follow dsh's own local-trust model**: `dsh web` and the
+  desktop app listen on the loopback interface by default, so they are reachable
+  from this machine only and do not pass through dsh's API authentication layer.
+  If you bind dsh web to a routable address (e.g. `0.0.0.0`), these endpoints
+  become reachable too — restrict them at the network layer (firewall or an
+  authenticating reverse proxy) in that case.
+- Image reads do not go through this plugin: the client calls the host's
+  `readAttachment` with the current session's credential, so its authorization
+  matches the transcript's (only attachments that session references).
+- Limits: 64 KB request bodies; `seq` must be a safe non-negative integer; the
+  target must be a `user/message` currently on the model-visible surface.
 - The plugin collects and reports nothing; all state stays in the local session
   log.
 
 ## Log & recovery
 
 - The session log (an append-only event stream) **never loses a message**.
-- Every state change appends a `hook/invoked` event with payload
-  `{ source: 'xsj.rewind', phase: 'mark' | 'cancel' | 'commit', targetSeq, hiddenFrom?, hiddenTo?, preview? }`.
-  The type is a known-but-unused reserved entry in this build, so the records
-  are reload-safe.
-- After a process restart, opening a session replays these records to rebuild
-  the hidden ranges — model-side and UI-side hiding stay consistent across
-  restarts.
-- The trajectory view does not render this reserved event type; audit the raw
-  session JSONL log directly.
+- A commit only appends an empty-content `developer/message`
+  (`surfaceOp: replace`); no unknown event type is ever written, so the log
+  always opens on 0.2.x.
+- After a process restart, surface replay rebuilds the same truncation:
+  model-side and UI-side hiding stay consistent across restarts.
+- The trajectory view does not render replaced copies; the rows after a rewind
+  still exist there as original events. Audit the raw session log directly.
 
-## Install
+## Known limits
 
-```powershell
-# from anywhere; the path points at your clone of this repo:
-dsh plugin --profile web add <absolute path to this repo>
-
-# restart the DSH process, then refresh the browser page
-```
-
-The command registers the package into the profile
-(`~/.dsh/profiles/<name>/package.json`: `dependencies` + `dsh.profile.bundles`).
-At boot the profile merges this package's `cordis.patch.yml`, inserting the
-host plugin row; the web client scan then serves `lib/client.js` automatically.
-
-## Uninstall
-
-```powershell
-dsh plugin --profile web remove @xsj/dsh-rewind
-# restart DSH. Rewind records in session logs are harmless (hook/invoked is a
-# known event type).
-```
-
-## How it works
-
-- **Model-side truncation**: patches the live `Session` object's
-  `deriveMessages()` to skip hidden surface ranges (memoized by a signature of
-  surface size / range count / replace generation). The request builder, the
-  `llm/stream` reconstruction invariant, and the image check all share this
-  one method, so every reader stays consistent. No message event is ever
-  added, removed, or rewritten.
-- **Interrupt**: on mark, a running agent is cancelled with
-  `agent.cancel({ kind: 'user' }, { keepInbox: true })`; queued messages
-  survive and continue from the rewind point.
-- **Commit point**: inside the `agent/pre-step` waterfall, the first step that
-  claims a real input message seals the hidden range
-  `[targetSeq, current log end]`; the new message is appended afterwards and
-  stays visible.
-- **UI hiding**: purely DOM-driven — chat rows carry `data-chat-flow-key`; the
-  client stamps each row with its seq and a MutationObserver applies inline
-  `display:none` to hidden rows. Nothing depends on the host store's internal
-  shape; cancelling or switching sessions restores everything without touching
-  any shipped renderer.
-- **Rewind icon**: takes over the `user`/`steering` cells of
-  `conversation.chat.node` at priority `-1` (the slot system's native
-  shadowing), replicating the native bubble (projectUserText / ImageGallery /
-  Tooltip / writeClipboard) plus the ↺ button.
+- The rewind target must still be on the model-visible surface. A message already
+  shadowed by compaction is rejected up front instead of failing at send time.
+- Rewinding does not restore workspace files.
+- A pending rewind does not survive a process restart: the draft stays in the
+  composer, but the pending state does not, which matches the design (the draft
+  is the only carrier).
 
 ## Porting
 
 The plugin has no npm dependencies: the host half uses only Node builtins and
-injected services; the client half pulls `react`,
-`@deepseek-ai/dsh-client-ui-primitives`, and
-`@deepseek-ai/dsh-client-ui-attachment` from the shell's frozen module table
-via `window.__ModuleLoader__`. Clone this repo on any machine and follow
-"Install".
+injected services; the client half pulls `react` and
+`@deepseek-ai/dsh-client-ui-primitives` from the shell's frozen module table via
+`window.__ModuleLoader__`. Clone this repo on any machine and follow "Install".
+
+## Tests
+
+```powershell
+node test/hiding.test.mjs          # row-hiding verdicts (pure DOM logic)
+node test/client-smoke.test.mjs    # client registration/rendering under 0.2.1
+# the host half needs the real @deepseek-ai/dsh-session (its lib/index.js, e.g.
+# packages/core/session/lib/index.js in a source checkout, or any node_modules):
+$env:DSH_SESSION_MODULE="<path>/lib/index.js"; node test/host.test.mjs
+```
 
 ## License
 
